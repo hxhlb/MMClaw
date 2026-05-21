@@ -108,7 +108,7 @@ class Engine(object):
     def _refresh_codex_token(self):
         """Refreshes the OAuth token for Codex provider."""
         try:
-            from .config import ConfigManager
+            from ..config import ConfigManager
             engine_config = self.config["engines"]["codex"]
             refresh_token = engine_config.get("refresh_token")
             if not refresh_token:
@@ -149,7 +149,7 @@ class Engine(object):
     def _refresh_gemini_cli_token(self):
         """Refreshes the OAuth token for Gemini CLI provider."""
         try:
-            from .config import ConfigManager
+            from ..config import ConfigManager
             import urllib.parse
             engine_config = self.config["engines"]["gemini-cli"]
             refresh_token = engine_config.get("refresh_token")
@@ -181,7 +181,7 @@ class Engine(object):
 
     def _get_gemini_cli_project_id(self):
         """Discovers and caches the GCP project ID via loadCodeAssist, onboarding free tier if needed."""
-        from .config import ConfigManager
+        from ..config import ConfigManager
         engine_config = self.config["engines"]["gemini-cli"]
         if engine_config.get("project_id"):
             return engine_config["project_id"]

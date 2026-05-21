@@ -28,6 +28,9 @@ class BaseMemory:
     def add(self, role, content):
         pass
 
+    def add_message(self, message):
+        self.add(message.get("role", "user"), message.get("content", ""))
+
     def get_all(self):
         pass
 
@@ -170,6 +173,9 @@ class StatelessMemory(GlobalFileMemory):
     def add(self, role, content):
         self.history.append({"role": role, "content": content})
 
+    def add_message(self, message):
+        self.history.append(message)
+
     def save_file(self, filename: str, data: bytes) -> str:
         import tempfile
         path = os.path.join(tempfile.gettempdir(), filename)
@@ -239,6 +245,10 @@ class FileMemory(GlobalFileMemory):
         entry = {"role": role, "content": content}
         self.history.append(entry)
         self._append(entry)
+
+    def add_message(self, message):
+        self.history.append(message)
+        self._append(message)
 
     @property
     def files_dir(self):

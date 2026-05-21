@@ -464,6 +464,17 @@ def run_setup(existing_config=None):
                     config["stream"] = True
                 # else: keep current value
 
+            print("\nTool Calling Mode:")
+            print("1. Native provider tools (default)")
+            print("2. JSON protocol")
+            current_tool_mode = config.get("tool_calling_mode", "native")
+            current_tool_idx = "2" if current_tool_mode == "json" else "1"
+            tool_mode_choice = input(f"Choice (1 or 2) [Current: {current_tool_idx}]: ").strip()
+            if tool_mode_choice == "2":
+                config["tool_calling_mode"] = "json"
+            else:
+                config["tool_calling_mode"] = "native"
+
             break  # Exit provider selection loop
 
     # 2. Browser Configuration

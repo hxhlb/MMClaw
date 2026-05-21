@@ -237,8 +237,20 @@ class ConfigManager(object):
         "- wait(seconds)\n\n"
     )
 
+    NATIVE_SYSTEM_PROMPT = (
+        "You are MMClaw, an autonomous AI agent. "
+        "Use the provided native tools when tool use is needed. "
+        "Do not emit JSON for tool calls and do not include a self-defined 'thought' field. "
+        "When no tool is needed, answer the user directly in plain text.\n\n"
+        "Tool use policy:\n"
+        "- Use tools to inspect files, run commands, manage sessions, browse, or complete tasks that require external actions.\n"
+        "- After requesting a tool, wait for the tool result before continuing.\n"
+        "- For long-running or blocking commands, use shell_async instead of shell_execute.\n\n"
+    )
+
     DEFAULT_CONFIG = {
         "engine_type": "openai",
+        "tool_calling_mode": "native",
         "browser": {
             "enabled": False,
             "data_dir": "~/.mmclaw/browser_data",
@@ -398,6 +410,13 @@ class ConfigManager(object):
                     if key in config: del config[key]
                 needs_save = True
 
+            if "tool_calling_mode" not in config:
+                config["tool_calling_mode"] = cls.DEFAULT_CONFIG["tool_calling_mode"]
+                needs_save = True
+            if "native_function_calling_mode" in config:
+                del config["native_function_calling_mode"]
+                needs_save = True
+
             if needs_save:
                 cls.save(config)
                 
@@ -490,6 +509,18 @@ class ConfigManager(object):
         )
 
     @classmethod
+    def _native_prompt_adapter(cls, text):
+        return (
+            text
+            .replace('Only set a non-empty "content" in the FINAL response', "Only provide a non-empty final answer")
+            .replace('When you do output content', "When you do output a final answer")
+            .replace('Set "content" to "" in every response.', "Return an empty final answer in every response.")
+            .replace('set "content" to "".', "return an empty final answer.")
+            .replace('via the "content" field', "in your response")
+            .replace('only set "content"', "only answer")
+        )
+
+    @classmethod
     def get_full_prompt(cls, config=None):
         """Combine base prompt with skills and interface context.
 
@@ -571,14 +602,24 @@ class ConfigManager(object):
 
         # print("================\n" + os_context)
 
+        tool_calling_mode = config.get("tool_calling_mode", "native")
+        base_prompt = cls.NATIVE_SYSTEM_PROMPT if tool_calling_mode == "native" else cls.BASE_SYSTEM_PROMPT
+        heartbeat_prompt = cls._get_heartbeat_prompt()
+        cron_prompt = cls._get_cron_prompt()
+        watcher_prompt = cls._get_watcher_prompt()
+        if tool_calling_mode == "native":
+            heartbeat_prompt = cls._native_prompt_adapter(heartbeat_prompt)
+            cron_prompt = cls._native_prompt_adapter(cron_prompt)
+            watcher_prompt = cls._native_prompt_adapter(watcher_prompt)
+
         return (
-            cls.BASE_SYSTEM_PROMPT
+            base_prompt
             + cls._get_memory_tools_prompt()
             + cls._get_session_tools_prompt()
             + cls._get_tool_notices_prompt()
-            + cls._get_heartbeat_prompt()
-            + cls._get_cron_prompt()
-            + cls._get_watcher_prompt()
+            + heartbeat_prompt
+            + cron_prompt
+            + watcher_prompt
             + os_context + workspace_context + engine_context + browser_context + interface_context
             + SkillManager.get_skills_prompt() + SkillManager.get_skill_kg_prompt()
         )

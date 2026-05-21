@@ -12,6 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from .providers import Engine
 from .tools import ShellTool, AsyncShellTool, FileTool, TimerTool, SessionTool, UpgradeTool, BrowserTool
+from .tool_schemas import get_native_tool_schemas
 from .config import _find_file_icase
 from .memory import FileMemory, StatelessMemory
 from .watcher import WatcherManager
@@ -304,7 +305,16 @@ class CronManager:
 class MMClaw(object):
     def __init__(self, config, connector, system_prompt, use_stateless_arg_connector=False, stateless_use_global_memory=False):
         self.config = config
+        if "tool_calling_mode" not in self.config:
+            self.config["tool_calling_mode"] = "native"
         self.engine = Engine(config)
+        if self.config.get("tool_calling_mode") == "native" and not self.engine.supports_native_tools:
+            print(f"[!] Native tool calling is not implemented for {self.config.get('engine_type')}; falling back to JSON tool protocol.")
+            self.config["tool_calling_mode"] = "json"
+        elif self.config.get("tool_calling_mode") == "native":
+            print(f"[*] Tool calling mode: native ({self.config.get('engine_type')})")
+        else:
+            print("[*] Tool calling mode: JSON protocol")
         self.connector = connector
         self.memory = StatelessMemory(system_prompt, use_global_memory=stateless_use_global_memory) if use_stateless_arg_connector else FileMemory(system_prompt)
         self.connector.file_saver = self.memory.save_file
@@ -353,7 +363,7 @@ class MMClaw(object):
         if self._stop_event.is_set():
             raise StopRequested()
 
-    def _ask_with_stop(self, messages):
+    def _ask_with_stop(self, messages, tools=None):
         """Run engine.ask() in a daemon thread, interruptible by the stop event."""
         result_box = [None]
         error_box  = [None]
@@ -361,7 +371,7 @@ class MMClaw(object):
 
         def _ask():
             try:
-                result_box[0] = self.engine.ask(messages)
+                result_box[0] = self.engine.ask(messages, tools=tools)
             except Exception as e:
                 error_box[0] = e
             finally:
@@ -448,6 +458,114 @@ class MMClaw(object):
             return None
         return None
 
+    def _append_model_message(self, message, history, use_local_history):
+        if use_local_history:
+            history.append(message)
+        else:
+            self.memory.add_message(message)
+
+    def _append_tool_result_messages(self, messages, history, use_local_history):
+        for message in messages:
+            if use_local_history:
+                history.append(message)
+            else:
+                self.memory.add_message(message)
+
+    def _execute_tool_call(self, name, args, silent_tools, is_background):
+        result = ""
+        session_reset = False
+
+        if name == "shell_execute":
+            if not silent_tools:self.connector.send(f"🐚 Shell: `{args.get('command')}`")
+            if is_background:
+                result = ShellTool.execute(args.get("command"))
+            else:
+                result = self._shell_execute_with_stop(args.get("command"))
+        elif name == "shell_async":
+            if not silent_tools:self.connector.send(f"🚀 Async Shell: `{args.get('command')}`")
+            result = AsyncShellTool.execute(args.get("command"))
+        elif name == "file_read":
+            if not silent_tools:self.connector.send(f"📖 Read: `{args.get('path')}`")
+            result = FileTool.read(args.get("path"))
+        elif name == "file_write":
+            if not silent_tools:self.connector.send(f"💾 Write: `{args.get('path')}`")
+            result = FileTool.write(args.get("path"), args.get("content"))
+        elif name == "file_upload":
+            if not silent_tools:self.connector.send(f"📤 Upload: `{args.get('path')}`")
+            self.connector.send_file(args.get("path"))
+            result = f"File {args.get('path')} sent."
+        elif name == "wait":
+            if not silent_tools:self.connector.send(f"⏳ Waiting {args.get('seconds')}s...")
+            if is_background:
+                result = TimerTool.wait(args.get("seconds"))
+            else:
+                result = self._wait_with_stop(args.get("seconds"))
+        elif name == "reset_session":
+            self.memory.reset()
+            if not silent_tools:self.connector.send("✨ Session reset! Starting fresh.")
+            result = "Success: Session history cleared."
+            session_reset = True
+        elif name == "memory_add":
+            if not silent_tools:self.connector.send(f"🧠 Memorize: `{args.get('memory', '')}`")
+            result = self.memory.global_memory_add(args.get("memory", ""))
+        elif name == "memory_list":
+            if not silent_tools:self.connector.send("🧠 Listing global memories...")
+            result = self.memory.global_memory_list()
+        elif name == "memory_delete":
+            indices = args.get("indices", args.get("index", -1))
+            if isinstance(indices, list):
+                indices = [int(i) for i in indices]
+            else:
+                indices = int(indices)
+            if not silent_tools:self.connector.send(f"🧠 Delete memory {indices}")
+            result = self.memory.global_memory_delete(indices)
+        elif name == "browser_start":
+            if not silent_tools:self.connector.send("🌐 Starting browser...")
+            user_data_dir = self.config.get("browser", {}).get("data_dir")
+            result = BrowserTool.start(user_data_dir=user_data_dir)
+        elif name == "browser_stop":
+            if not silent_tools:self.connector.send("🌐 Stopping browser...")
+            result = BrowserTool.stop()
+        elif name == "browser_navigate":
+            if not silent_tools:self.connector.send(f"🌐 Navigate: `{args.get('url')}`")
+            result = BrowserTool.navigate(args.get("url"))
+        elif name == "browser_click":
+            if not silent_tools:self.connector.send(f"🌐 Click: `{args.get('selector')}`")
+            result = BrowserTool.click(args.get("selector"))
+        elif name == "browser_fill":
+            if not silent_tools:self.connector.send(f"🌐 Fill: `{args.get('selector')}`")
+            result = BrowserTool.fill(args.get("selector"), args.get("text", ""))
+        elif name == "browser_get_text":
+            if not silent_tools:self.connector.send(f"🌐 Get text: `{args.get('selector', 'body')}`")
+            result = BrowserTool.get_text(args.get("selector"))
+        elif name == "browser_screenshot":
+            if not silent_tools:self.connector.send("🌐 Screenshot...")
+            result = BrowserTool.screenshot(args.get("path"))
+            if result.startswith("OK:"):
+                if not silent_tools:self.connector.send_file(result[4:].strip())
+        elif name == "cron_create":
+            if not silent_tools:self.connector.send(f"⏰ Cron create: `{args.get('name')}`")
+            result = self.cron.create(args.get("name"), args.get("cron"), args.get("prompt"))
+        elif name == "cron_delete":
+            indices = args.get("indices", args.get("index", -1))
+            if isinstance(indices, list):
+                indices = [int(i) for i in indices]
+            else:
+                indices = int(indices)
+            if not silent_tools:self.connector.send(f"⏰ Cron delete: {indices}")
+            result = self.cron.delete(indices)
+        elif name == "cron_list":
+            if not silent_tools:self.connector.send("⏰ Listing cron jobs...")
+            result = self.cron.list_jobs()
+        elif name == "upgrade":
+            if not silent_tools:self.connector.send("⬆️ Upgrading MMClaw... (this is tricky — there's no notification when it's done. Please wait a moment, then ask me for my version number to confirm the upgrade succeeded.)")
+            result = UpgradeTool.upgrade()
+            if not silent_tools:self.connector.send(f"❌ Upgrade failed: {result}")
+        else:
+            result = f"Error: unknown tool '{name}'."
+
+        return result, session_reset
+
     def _worker(self, q: queue.Queue, mode: str):
         while True:
             user_text = q.get()
@@ -482,17 +600,60 @@ class MMClaw(object):
 
                     # Refresh system prompt before every call to pick up new skills or context changes
                     from .config import ConfigManager
-                    new_prompt = ConfigManager.get_full_prompt()
+                    new_prompt = ConfigManager.get_full_prompt(self.config)
                     self.memory.update_system_prompt(new_prompt)
 
                     use_local_history = is_background or self.use_stateless_arg_connector
                     ask_messages = [self.memory.get_all()[0]] + history if use_local_history else self.memory.get_all()
 
+                    native_enabled = (
+                        self.config.get("tool_calling_mode", "native") == "native"
+                        and self.engine.supports_native_tools
+                    )
+                    native_tools = get_native_tool_schemas(self.config) if native_enabled else None
+
                     if is_background:
-                        response_msg = self.engine.ask(ask_messages)
+                        response_msg = self.engine.ask(ask_messages, tools=native_tools)
                     else:
-                        response_msg = self._ask_with_stop(ask_messages)
+                        response_msg = self._ask_with_stop(ask_messages, tools=native_tools)
                     raw_text = response_msg.get("content", "")
+
+                    if native_enabled:
+                        tool_calls = response_msg.get("tool_calls") or []
+                        self._append_model_message(response_msg, history, use_local_history)
+
+                        if not tool_calls:
+                            if raw_text and not silent_content:
+                                self.connector.send(raw_text)
+                            break
+
+                        results = []
+                        session_reset = False
+                        for tool_call in tool_calls:
+                            if not is_background:
+                                self._check_stop()
+
+                            name = tool_call.get("name")
+                            args = tool_call.get("args", {}) or {}
+
+                            print(f"    [Native Tool Call: {name}]")
+                            if self.debug:
+                                print(f"    Args: {json.dumps(args)}")
+
+                            result, reset_requested = self._execute_tool_call(name, args, silent_tools, is_background)
+                            results.append(result)
+                            if self.debug:
+                                print(f"\n    [Tool Output: {name}]\n    {result}\n")
+                            if reset_requested:
+                                session_reset = True
+                                break
+
+                        if session_reset:
+                            break
+
+                        result_messages = self.engine.tool_result_messages(tool_calls, results)
+                        self._append_tool_result_messages(result_messages, history, use_local_history)
+                        continue
 
                     if use_local_history:
                         history.append({"role": "assistant", "content": raw_text})
